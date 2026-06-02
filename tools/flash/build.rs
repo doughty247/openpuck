@@ -4,22 +4,18 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=OPENPUCK_EMBED_FIRMWARE");
-    println!("cargo:rerun-if-env-changed=OPENPUCK_EMBED_ESPFLASH");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set"));
     let generated = out_dir.join("embedded_firmware.rs");
 
     let firmware_path = env::var_os("OPENPUCK_EMBED_FIRMWARE").map(PathBuf::from);
-    let espflash_path = env::var_os("OPENPUCK_EMBED_ESPFLASH").map(PathBuf::from);
 
-    let firmware_rust = generate_embedded_pair("EMBEDDED_FIRMWARE", "EMBEDDED_FIRMWARE_NAME", firmware_path.as_deref(), &out_dir);
-    let espflash_rust = generate_embedded_pair("EMBEDDED_ESPFLASH", "EMBEDDED_ESPFLASH_NAME", espflash_path.as_deref(), &out_dir);
+    let firmware_rust = generate_embedded("EMBEDDED_FIRMWARE", "EMBEDDED_FIRMWARE_NAME", firmware_path.as_deref(), &out_dir);
 
-    fs::write(&generated, format!("{firmware_rust}{espflash_rust}"))
-        .expect("failed to write generated source");
+    fs::write(&generated, firmware_rust).expect("failed to write generated source");
 }
 
-fn generate_embedded_pair(bytes_name: &str, file_name_const: &str, source: Option<&Path>, out_dir: &Path) -> String {
+fn generate_embedded(bytes_name: &str, file_name_const: &str, source: Option<&Path>, out_dir: &Path) -> String {
     match source {
         Some(path) => {
             println!("cargo:rerun-if-changed={}", path.display());

@@ -7,3 +7,9 @@ build = "build.rs"
 [[bin]]
 name = "flash"
 path = "src/main.rs"
+
+[dependencies]
+espflash = { version = "4.4.0", default-features = false, features = ["serialport"] }
+serialport = { version = "4.7", default-features = false }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }

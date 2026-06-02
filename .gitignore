@@ -13,8 +13,6 @@ __pycache__/
 *.pyc
 .venv/
 
-# Local tooling and experiments
-/tools/
 
 # Docs are kept locally and excluded from repository history
 /docs/
