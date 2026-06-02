@@ -54,23 +54,16 @@ pub struct HapticsIntent {
 /// Route the Steam QAM signal (`touchpad`) to Switch Capture.
 pub fn remap_steam_for_switch(s: &GamepadState) -> GamepadState {
     let mut r = *s;
-    // Steam BLE face-button bits arrive rotated versus our logical ABXY.
-    // Rotate back before state_to_switch applies Nintendo ABXY ordering.
-    r.a = s.b;
-    r.b = s.y;
-    r.y = s.x;
-    r.x = s.a;
+    // parse_steam uses Xbox/XInput naming conventions and is already correct:
+    //   state.a = bottom face button (Xbox A → Nintendo B)
+    //   state.b = right  face button (Xbox B → Nintendo A)
+    //   state.x = left   face button (Xbox X → Nintendo Y)
+    //   state.y = top    face button (Xbox Y → Nintendo X)
+    // state_to_switch handles the Xbox→Nintendo layout conversion via its bit
+    // assignments, so no face-button rotation is needed here.
 
-    // Steam BLE bit-positions for system buttons are swapped vs. our field names,
-    // same as face buttons. Observed mapping:
-    //   qam bit  → physical left stick click  (L3)
-    //   home bit → physical right stick click (R3)
-    //   r3 bit   → physical Steam button      (Home)
-    //   l3 bit   → physical QAM button        (Capture)
-    r.l3 = s.qam;
-    r.r3 = s.home;
-    r.home = s.r3;
-    r.touchpad = s.l3;
+    // Map Steam QAM ("..." quick-access button) to Switch Capture.
+    r.touchpad = s.qam;
     r
 }
 
