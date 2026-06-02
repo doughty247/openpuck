@@ -209,7 +209,7 @@ fn ws2812_write(_pin: &mut Output<'static>, rgb: (u8, u8, u8), cycles_per_us: u3
         unsafe { core::ptr::write_volatile(W1TC, BIT); }
         spin(reset);
 
-        for &byte in &[rgb.1, rgb.0, rgb.2] {   // WS2812B GRB order
+        for &byte in &[rgb.1, rgb.0, rgb.2, 0u8] {   // GRB + W=0 (SK6812MINI-E GRBW / WS2812B compatible)
             for bit in (0..8_u8).rev() {
                 if (byte >> bit) & 1 == 0 {
                     unsafe { core::ptr::write_volatile(W1TS, BIT); }
