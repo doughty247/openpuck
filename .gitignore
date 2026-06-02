@@ -1,0 +1,20 @@
+target/
+
+# Host flasher output and local firmware images
+/flash
+/*.bin
+
+# Local logs and captures
+/*.log
+/captures/
+
+# Python cache
+__pycache__/
+*.pyc
+.venv/
+
+# Local tooling and experiments
+/tools/
+
+# Docs are kept locally and excluded from repository history
+/docs/

@@ -1,0 +1,17 @@
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor"
+rustflags = [
+    "-C", "link-arg=-Tlinkall.x",
+    "-C", "force-frame-pointers",
+]
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[unstable]
+build-std = ["core", "alloc"]
+
+[env]
+# Allow subscribing to multiple HID Report characteristics on the Steam Controller
+TROUBLE_HOST_GATT_CLIENT_NOTIFICATION_MAX_SUBSCRIBERS = "8"
+TROUBLE_HOST_GATT_CLIENT_NOTIFICATION_QUEUE_SIZE = "4"

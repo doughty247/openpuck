@@ -1,0 +1,272 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  ESPFLASH_VERSION: v4.4.0
+  FIRMWARE_IMAGE: openpuck-${{ github.ref_name }}.bin
+
+jobs:
+  release-meta:
+    runs-on: ubuntu-latest
+    outputs:
+      is_rc: ${{ steps.classify.outputs.is_rc }}
+      is_stable: ${{ steps.classify.outputs.is_stable }}
+
+    steps:
+      - name: Classify release tag
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ github.ref_name }}'
+          if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(rc|b)[0-9]+$ ]]; then
+            echo "is_rc=true" >> "$GITHUB_OUTPUT"
+            echo "is_stable=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "is_rc=false" >> "$GITHUB_OUTPUT"
+            echo "is_stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unsupported release tag format: $tag" >&2
+            echo "Expected vX.Y.Z, vX.Y.Z-rcN, or vX.Y.Z-bN" >&2
+            exit 1
+          fi
+
+  firmware:
+    runs-on: ubuntu-latest
+    needs: release-meta
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo registry and git index
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache Espressif toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+            ~/export-esp.sh
+            ~/.rustup/toolchains/esp*
+          key: ${{ runner.os }}-espup-${{ hashFiles('Cargo.lock', '.cargo/config.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-espup-
+
+      - name: Install espup
+        shell: bash
+        run: |
+          if ! command -v espup >/dev/null 2>&1; then
+            cargo install espup --locked
+          fi
+
+      - name: Install Espressif Rust toolchain
+        shell: bash
+        run: |
+          if [[ ! -f "$HOME/export-esp.sh" ]]; then
+            espup install -f "$HOME/export-esp.sh" -t esp32s3
+          fi
+
+      - name: Download host espflash binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/bin/linux .ci/bin/windows
+
+          curl -fsSL -o /tmp/espflash-linux.zip \
+            "https://github.com/esp-rs/espflash/releases/download/${ESPFLASH_VERSION}/espflash-x86_64-unknown-linux-gnu.zip"
+          unzip -j -o /tmp/espflash-linux.zip -d .ci/bin/linux
+          chmod +x .ci/bin/linux/espflash
+
+          curl -fsSL -o /tmp/espflash-windows.zip \
+            "https://github.com/esp-rs/espflash/releases/download/${ESPFLASH_VERSION}/espflash-x86_64-pc-windows-msvc.zip"
+          unzip -j -o /tmp/espflash-windows.zip -d .ci/bin/windows
+
+      - name: Build merged ESP32-S3 firmware image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$HOME/export-esp.sh"
+          cargo +esp build --release
+          ./.ci/bin/linux/espflash save-image --chip esp32s3 --merge \
+            target/xtensa-esp32s3-none-elf/release/openpuck \
+            "$FIRMWARE_IMAGE"
+
+      - name: Upload merged firmware image
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged-firmware-image
+          path: ${{ env.FIRMWARE_IMAGE }}
+
+      - name: Upload firmware release asset artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-release-asset
+          path: ${{ env.FIRMWARE_IMAGE }}
+
+  linux-flasher:
+    runs-on: ubuntu-latest
+    needs:
+      - release-meta
+      - firmware
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo registry and git index
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install host Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Download merged firmware image
+        uses: actions/download-artifact@v4
+        with:
+          name: merged-firmware-image
+
+      - name: Download Linux espflash
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/bin/linux
+          curl -fsSL -o /tmp/espflash-linux.zip \
+            "https://github.com/esp-rs/espflash/releases/download/${ESPFLASH_VERSION}/espflash-x86_64-unknown-linux-gnu.zip"
+          unzip -j -o /tmp/espflash-linux.zip -d .ci/bin/linux
+          chmod +x .ci/bin/linux/espflash
+
+      - name: Build Linux flasher
+        shell: bash
+        env:
+          OPENPUCK_EMBED_FIRMWARE: ${{ env.FIRMWARE_IMAGE }}
+          OPENPUCK_EMBED_ESPFLASH: .ci/bin/linux/espflash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path tools/flash/Cargo.toml --release --target x86_64-unknown-linux-gnu
+          cp tools/flash/target/x86_64-unknown-linux-gnu/release/flash openpuck-flasher-linux-x86_64
+
+      - name: Upload Linux flasher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-flasher
+          path: openpuck-flasher-linux-x86_64
+
+  windows-flasher:
+    runs-on: windows-latest
+    needs:
+      - release-meta
+      - firmware
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo registry and git index
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\bin
+            ~\.cargo\registry\index
+            ~\.cargo\registry\cache
+            ~\.cargo\git\db
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install Windows MSVC Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Download merged firmware image
+        uses: actions/download-artifact@v4
+        with:
+          name: merged-firmware-image
+
+      - name: Download Windows espflash
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .ci/bin/windows | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/esp-rs/espflash/releases/download/${env:ESPFLASH_VERSION}/espflash-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP\espflash-windows.zip"
+          Expand-Archive -Path "$env:TEMP\espflash-windows.zip" -DestinationPath .ci/bin/windows -Force
+
+      - name: Build Windows flasher
+        shell: pwsh
+        env:
+          OPENPUCK_EMBED_FIRMWARE: ${{ env.FIRMWARE_IMAGE }}
+          OPENPUCK_EMBED_ESPFLASH: .ci/bin/windows/espflash.exe
+        run: |
+          cargo build --manifest-path tools/flash/Cargo.toml --release --target x86_64-pc-windows-msvc
+          Copy-Item tools/flash/target/x86_64-pc-windows-msvc/release/flash.exe openpuck-flasher-windows-x86_64.exe
+
+      - name: Upload Windows flasher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-flasher
+          path: openpuck-flasher-windows-x86_64.exe
+
+  release:
+    runs-on: ubuntu-latest
+    needs:
+      - release-meta
+      - firmware
+      - linux-flasher
+      - windows-flasher
+
+    steps:
+      - name: Download firmware release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-release-asset
+
+      - name: Download Linux flasher artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-flasher
+
+      - name: Download Windows flasher artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-flasher
+
+      - name: Attach release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: ${{ needs.release-meta.outputs.is_rc == 'true' }}
+          prerelease: ${{ needs.release-meta.outputs.is_rc == 'true' }}
+          files: |
+            openpuck-${{ github.ref_name }}.bin
+            openpuck-flasher-linux-x86_64
+            openpuck-flasher-windows-x86_64.exe
