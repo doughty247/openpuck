@@ -104,10 +104,10 @@ fn output_mode_from_u8(mode: u8) -> Option<OutputMode> {
 
 /// Fast RAM-backed output mode read for hot paths.
 ///
-/// If cache has not been initialized yet, defaults to DualSense until a flash
+/// If cache has not been initialized yet, defaults to XInput until a flash
 /// load/save path populates it.
 pub fn current_output_mode() -> OutputMode {
-    output_mode_from_u8(OUTPUT_MODE_CACHE.load(Ordering::Relaxed)).unwrap_or(OutputMode::DualSense)
+    output_mode_from_u8(OUTPUT_MODE_CACHE.load(Ordering::Relaxed)).unwrap_or(OutputMode::XInput)
 }
 
 fn cache_output_mode(mode: OutputMode) {
@@ -119,21 +119,21 @@ pub fn load_output_mode() -> OutputMode {
     let mut buf = [0u8; 16];
     let rc = unsafe { rom_read(MODE_FLASH_OFFSET, buf.as_mut_ptr() as *mut u32, 16) };
     if rc != 0 {
-        log::warn!("Output mode read failed (rc={}), defaulting to DualSense", rc);
-        cache_output_mode(OutputMode::DualSense);
-        return OutputMode::DualSense;
+        log::warn!("Output mode read failed (rc={}), defaulting to XInput", rc);
+        cache_output_mode(OutputMode::XInput);
+        return OutputMode::XInput;
     }
     if buf[0..4] != MODE_MAGIC {
-        log::warn!("Output mode magic missing, defaulting to DualSense");
-        cache_output_mode(OutputMode::DualSense);
-        return OutputMode::DualSense;
+        log::warn!("Output mode magic missing, defaulting to XInput");
+        cache_output_mode(OutputMode::XInput);
+        return OutputMode::XInput;
     }
     let mode = match output_mode_from_u8(buf[4]) {
         Some(mode) => mode,
         None => {
-            log::warn!("Output mode byte {} invalid, resetting flash to DualSense", buf[4]);
-            save_output_mode(OutputMode::DualSense);
-            OutputMode::DualSense
+            log::warn!("Output mode byte {} invalid, resetting flash to XInput", buf[4]);
+            save_output_mode(OutputMode::XInput);
+            OutputMode::XInput
         }
     };
     cache_output_mode(mode);

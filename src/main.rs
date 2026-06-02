@@ -300,6 +300,9 @@ async fn connection_state_task() {
 #[embassy_executor::task]
 async fn button_monitor_task(mut pin: Input<'static>) {
     log::info!("Starting BOOT button monitor task");
+    // Track the current mode locally so USB-reinit cache updates don't corrupt our cycle state.
+    // Read once from flash at startup; afterwards advance the local variable on every press.
+    let mut current = storage::load_output_mode();
     let mut last_toggle_at = embassy_time::Instant::now();
     loop {
         pin.wait_for_falling_edge().await;
@@ -318,7 +321,6 @@ async fn button_monitor_task(mut pin: Input<'static>) {
             continue;
         }
 
-        let current = storage::current_output_mode();
             let next = match current {
                 storage::OutputMode::XInput    => storage::OutputMode::SwitchPro,
                 storage::OutputMode::SwitchPro => storage::OutputMode::DualSense,
@@ -334,6 +336,7 @@ async fn button_monitor_task(mut pin: Input<'static>) {
         storage::save_output_mode(next);
         USB_REINIT.signal(());
         LED_MODE.store(next as u8, Ordering::Relaxed);
+        current = next; // advance local state regardless of flash success
         last_toggle_at = embassy_time::Instant::now();
 
         // Wait for release to avoid multiple toggles from one hold.
