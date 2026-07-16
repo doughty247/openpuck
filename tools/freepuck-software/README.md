@@ -81,9 +81,19 @@ is more restricted than Windows/Linux; deferred.
   stack latency on top of the 7.5 ms BLE radio leg — this has not been
   measured yet (needs real hardware) and should not be assumed equivalent to
   the dedicated-radio ESP32 dongle until it is.
-- **Gyro/accelerometer are not populated.** `parse_steam` zeroes IMU fields;
-  the Steam Controller 2's BLE IMU packet format is not yet confirmed (same
-  gap as the firmware).
+- **Gyro/accelerometer/real trackpad are provisional, not hardware-confirmed.**
+  `parse_steam` now reads them from a full-length (45+ byte) notification,
+  based on cross-referencing [safijari/openpuck](https://github.com/safijari/openpuck) —
+  an independent reverse-engineering of the same physical controller over a
+  *different* transport (2.4GHz RF, not BLE). The byte offsets line up
+  exactly where that project's documented report layout says they should
+  once you account for BLE dropping the leading report-ID byte, which is
+  reasonable evidence, but nobody has captured a real BLE notification from
+  this project to confirm it. Treat gyro/accel/trackpad data (and the
+  digital L2/R2 click bits) as likely-correct-but-unverified until someone
+  runs `scan` against real hardware and checks. Short (17-byte) reports
+  still fall back to zeroed IMU and a stick-deflection proxy for trackpad
+  position, same as before this existed.
 
 ## Development
 

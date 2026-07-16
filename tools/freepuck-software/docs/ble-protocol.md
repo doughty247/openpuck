@@ -37,23 +37,63 @@ relying on a hardcoded ATT handle.
 
 ## Input report (Triton input characteristic notification)
 
-Minimum 17 bytes. Byte 0 is a rolling sequence counter.
+Minimum 17 bytes for buttons/sticks/triggers; 45 bytes for the full report
+including the real right trackpad and IMU (see below). Byte 0 is a rolling
+sequence counter.
 
 | Bytes | Field |
 |---|---|
 | 0 | sequence counter |
 | 1 | button byte 0: bit0=A, bit1=B, bit2=X, bit3=Y, bit4=QAM ("..."), bit5=R3, bit6=Start |
 | 2 | button byte 1: bit1=R1, bit2=dpad down, bit3=dpad right, bit4=dpad left, bit5=dpad up, bit6=Select, bit7=L3 |
-| 3 | button byte 2: bit0=Home, bit1=Touchpad click, bit3=L1 |
-| 5-6 | left trigger, u16 LE, `lt = (raw >> 7) as u8`, digital press when `raw > 8000` |
+| 3 | button byte 2: bit0=Home, bit1=L4 paddle, bit3=L1, bit6=right pad click, bit7=right trigger (R2) digital click |
+| 4 | button byte 3: bit2=left pad click, bit3=left trigger (L2) digital click, bit4/5=right/left grip touch |
+| 5-6 | left trigger, u16 LE, `lt = min(raw >> 7, 255)` — **must saturate, not wrap**: raw tops out near half-scale (~0x8000) at a full pull, so `raw >> 7` can exceed 255 |
 | 7-8 | right trigger, u16 LE, same scaling |
 | 9-10 | left stick X, i16 LE, positive = right |
 | 11-12 | left stick Y, i16 LE, positive = up |
 | 13-14 | right stick X, i16 LE, positive = right |
 | 15-16 | right stick Y, i16 LE, positive = up |
+| 23-24 | right trackpad X, i16 LE — only present on a full-length notification |
+| 25-26 | right trackpad Y, i16 LE |
+| 27-28 | right trackpad press, i16 LE — non-zero while a finger is on the pad |
+| 33-34 | accel X, i16 LE |
+| 35-36 | accel Y, i16 LE |
+| 37-38 | accel Z, i16 LE |
+| 39-40 | gyro X, i16 LE |
+| 41-42 | gyro Y, i16 LE |
+| 43-44 | gyro Z, i16 LE |
 
-IMU (gyro/accel) fields are not populated by `parse_steam` — the packet
-format for `SETTING_IMU_MODE` has not been confirmed against hardware.
+`parse_steam` uses the right trackpad + IMU fields when `payload.len() >= 45`
+and falls back to a stick-deflection proxy for trackpad position (and leaves
+gyro/accel zeroed) on shorter reports.
+
+**Provenance and confidence.** Bytes 0-16 (buttons through sticks) are
+exercised against real hardware by the firmware. Byte offsets 17 and beyond
+(trackpad, IMU), the digital-click bits in bytes 3-4, and the trigger
+saturation fix are cross-checked against an independent reverse-engineering
+of the same physical controller over a different transport —
+[safijari/openpuck](https://github.com/safijari/openpuck)'s
+`docs/PROTOCOL.md` and `triton.h`/`rf_link.cpp`, which decode the
+controller's native report `0x45` (46 bytes, byte 0 = report ID) over its
+2.4GHz RF link. This BLE notification payload lines up with that layout
+exactly one byte earlier at every field checked so far, consistent with the
+report-ID byte being stripped before the BLE characteristic delivers it —
+but that alignment is *inferred*, not confirmed against a real BLE capture
+from this project. Three concrete bugs this cross-reference caught, all now
+fixed in `tools/freepuck-software` and confirmed present in this repo's
+shipped ESP32 firmware too (not yet fixed there — see that project's own
+history for whether/when it's ported back):
+
+1. **Touchpad click read the wrong bit.** Byte 3 bit 1 is the L4 back-paddle
+   button, not a touchpad bit — the real touchpad-click signal is byte 3 bit
+   6 (right pad) or byte 4 bit 2 (left pad).
+2. **Trigger scaling wrapped instead of saturating** on a hard pull (`raw >>
+   7` can reach 511, and a plain `as u8` cast wraps that back down to a small
+   value instead of reading as fully pressed).
+3. **Digital trigger-press was purely an analog-threshold guess** (`raw >
+   8000`) when the controller actually reports a dedicated digital-click bit
+   per trigger (byte 3 bit 7 for R2, byte 4 bit 3 for L2).
 
 ## Commands (feature characteristic)
 
@@ -89,6 +129,13 @@ format for `SETTING_IMU_MODE` has not been confirmed against hardware.
 
 ## What's provisional
 
-Nothing above is provisional — this file only documents fields the firmware
-already parses and exercises against real hardware. Byte ranges not listed
-here (most of bytes 3-4, parts of the packet past byte 17) are not yet mapped.
+Bytes 0-16 (buttons through sticks) and everything in the Commands/Rumble
+sections are exercised against real hardware by the firmware — not
+provisional. Bytes 17+ (real right trackpad, accel, gyro), the two
+digital-click bits in bytes 3-4, and the trigger-saturation fix are
+cross-checked against a differently-transported reference implementation
+(see the Provenance note above) but not yet confirmed against a real BLE
+capture from this project. IMU axis orientation/sign and units (e.g.
+whether accel needs any scale factor before use) are unconfirmed either
+way — this bridge currently passes the raw i16 values straight through
+unscaled.

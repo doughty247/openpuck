@@ -112,11 +112,31 @@ static DS_TOUCH_SEQ: AtomicU8 = AtomicU8::new(0);
 // ------------------------------------------------------------------
 
 /// Steam Controller full-state BLE report (Triton input characteristic).
-/// payload[0]=seq; btn bytes 1-3; triggers 5-8; sticks 9-16.
-/// IMU fields are zero until the SETTING_IMU_MODE packet format is confirmed.
+/// payload[0]=seq; btn bytes 1-4; triggers 5-8; sticks 9-16; right pad,
+/// gyro, and accel ride in the tail of a full report (see below) and are
+/// only present on the 45+ byte notifications, not the 17-byte minimum.
+///
+/// Field offsets and the button bitfield were cross-checked against
+/// safijari/openpuck's `docs/PROTOCOL.md` and `triton.h`/`rf_link.cpp` —
+/// an independent reverse-engineering of the same physical Steam
+/// Controller 2, over its 2.4GHz RF link rather than BLE. Its documented
+/// report 0x45 is 46 bytes starting with the report ID; this BLE
+/// notification payload appears to be the same layout with that leading
+/// report-ID byte stripped (every offset below lines up exactly one byte
+/// earlier), which is what let the trigger/button/gyro/accel/pad fixes
+/// below be derived with reasonable confidence. That alignment is
+/// inferred from a differently-transported reference implementation, not
+/// confirmed against a real BLE capture from this project — treat the
+/// newly-added fields (real trackpad coordinates, gyro, accel, the digital
+/// trigger-click bits) as provisional pending a hardware pass.
 pub fn parse_steam(payload: &[u8]) -> Option<GamepadState> {
     if payload.len() < 17 { return None; }
     let btn0 = payload[1]; let btn1 = payload[2]; let btn2 = payload[3];
+    // 4th button byte: left-pad touch/click, left trigger click, grip touch.
+    // Always present — it falls inside the 17-byte minimum this bridge
+    // already required, we just weren't reading it.
+    let btn3 = payload[4];
+
     let lt_val = read_u16_le(payload, 5);
     let rt_val = read_u16_le(payload, 7);
     let ls_x = read_i16_le(payload, 9);
@@ -129,10 +149,48 @@ pub fn parse_steam(payload: &[u8]) -> Option<GamepadState> {
     let rx = ((rs_x >> 8) + 128).clamp(0, 255) as u8;
     let ry = (128 - (rs_y >> 8)).clamp(0, 255) as u8;
 
-    // Map Steam right touchpad full-range i16 coordinates to DualSense touch area.
-    let pad_x = ((((rs_x as i32) + 32768) * 1919) / 65535).clamp(0, 1919) as u16;
-    let pad_y = (((32767 - rs_y as i32) * 1079) / 65535).clamp(0, 1079) as u16;
-    let pad_active = rs_x.abs() > 1200 || rs_y.abs() > 1200;
+    // The trigger's raw range tops out near half-scale (~0x8000) even at a
+    // full pull, so `raw >> 7` alone can exceed 255 (a hard pull wraps back
+    // down to a small value through a plain `as u8` cast instead of reading
+    // as fully pressed) — saturate instead of wrapping.
+    let lt = (lt_val >> 7).min(255) as u8;
+    let rt = (rt_val >> 7).min(255) as u8;
+
+    // Digital trigger-click has its own dedicated bit distinct from the
+    // analog value; OR it with the old analog-threshold heuristic so a
+    // light-but-not-quite-clicked pull still registers either way.
+    let l2_dig = btn3 & 0x08 != 0 || lt_val > 8000;
+    let r2_dig = btn2 & 0x80 != 0 || rt_val > 8000;
+
+    // Touchpad click = either trackpad's own click bit. (Previously read
+    // btn2 & 0x02, which is actually the L4 back-paddle button — a
+    // real bug, not just an approximation.)
+    let touchpad = btn2 & 0x40 != 0 || btn3 & 0x04 != 0;
+
+    // Real right-trackpad coordinates, gyro, and accel only ride on a full
+    // report; short reports fall back to the old stick-deflection proxy for
+    // pad position (better than going dead) and leave IMU zeroed, same as
+    // this function's behaviour before these fields existed.
+    let (pad_x, pad_y, pad_active, gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z) = if payload.len() >= 45 {
+        let rp_x = read_i16_le(payload, 23);
+        let rp_y = read_i16_le(payload, 25);
+        let rp_press = read_i16_le(payload, 27);
+        let pad_x = ((((rp_x as i32) + 32768) * 1919) / 65535).clamp(0, 1919) as u16;
+        let pad_y = (((32767 - rp_y as i32) * 1079) / 65535).clamp(0, 1079) as u16;
+        let pad_active = rp_press != 0;
+        let accel_x = read_i16_le(payload, 33);
+        let accel_y = read_i16_le(payload, 35);
+        let accel_z = read_i16_le(payload, 37);
+        let gyro_x = read_i16_le(payload, 39);
+        let gyro_y = read_i16_le(payload, 41);
+        let gyro_z = read_i16_le(payload, 43);
+        (pad_x, pad_y, pad_active, gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z)
+    } else {
+        let pad_x = ((((rs_x as i32) + 32768) * 1919) / 65535).clamp(0, 1919) as u16;
+        let pad_y = (((32767 - rs_y as i32) * 1079) / 65535).clamp(0, 1079) as u16;
+        let pad_active = rs_x.abs() > 1200 || rs_y.abs() > 1200;
+        (pad_x, pad_y, pad_active, 0, 0, 0, 0, 0, 0)
+    };
 
     Some(GamepadState {
         a:          btn0 & 0x01 != 0,
@@ -141,16 +199,14 @@ pub fn parse_steam(payload: &[u8]) -> Option<GamepadState> {
         y:          btn0 & 0x08 != 0,
         l1:         btn2 & 0x08 != 0,
         r1:         btn1 & 0x02 != 0,
-        lt:         (lt_val >> 7) as u8,
-        rt:         (rt_val >> 7) as u8,
-        l2_dig:     lt_val > 8000,
-        r2_dig:     rt_val > 8000,
+        lt, rt,
+        l2_dig, r2_dig,
         l3:         btn1 & 0x80 != 0,
         r3:         btn0 & 0x20 != 0,
         start:      btn0 & 0x40 != 0,
         select:     btn1 & 0x40 != 0,
         home:       btn2 & 0x01 != 0,
-        touchpad:   btn2 & 0x02 != 0,
+        touchpad,
         qam:        btn0 & 0x10 != 0, // "..." quick access button
         dpad_up:    btn1 & 0x20 != 0,
         dpad_down:  btn1 & 0x04 != 0,
@@ -158,8 +214,8 @@ pub fn parse_steam(payload: &[u8]) -> Option<GamepadState> {
         dpad_right: btn1 & 0x08 != 0,
         lx, ly, rx, ry,
         pad_x, pad_y, pad_active,
-        gyro_x: 0, gyro_y: 0, gyro_z: 0,
-        accel_x: 0, accel_y: 0, accel_z: 0,
+        gyro_x, gyro_y, gyro_z,
+        accel_x, accel_y, accel_z,
     })
 }
 
@@ -296,10 +352,17 @@ pub fn state_to_dualsense(s: &GamepadState, steam_touchpad_mode: bool) -> [u8; 6
     r[18] = gy[0]; r[19] = gy[1];
     r[20] = gz[0]; r[21] = gz[1];
 
-    // Accel X/Y/Z at r[22..28] (signed i16 LE, 8192 LSB per g).
-    let ax = (s.accel_x.saturating_mul(32)).to_le_bytes();
-    let ay = (s.accel_y.saturating_mul(32)).to_le_bytes();
-    let az = (s.accel_z.saturating_mul(32)).to_le_bytes();
+    // Accel X/Y/Z at r[22..28] (signed i16 LE). Passed through unscaled: an
+    // independent reverse-engineering (safijari/openpuck's mode_ps5.cpp)
+    // sends the Steam Controller 2's raw accel/gyro values straight through
+    // to a real DualSense-driver HID report with no rescaling at all, which
+    // is why the ×32 this used to apply here was removed — neither this
+    // project nor that scale factor has been confirmed against real
+    // hardware, but "no scaling," matching a project others have actually
+    // run, is the safer default until someone measures it.
+    let ax = s.accel_x.to_le_bytes();
+    let ay = s.accel_y.to_le_bytes();
+    let az = s.accel_z.to_le_bytes();
     r[22] = ax[0]; r[23] = ax[1];
     r[24] = ay[0]; r[25] = ay[1];
     r[26] = az[0]; r[27] = az[1];
@@ -467,6 +530,33 @@ mod tests {
         p
     }
 
+    fn synthetic_report_full(btn0: u8, btn1: u8, btn2: u8, btn3: u8) -> Vec<u8> {
+        let mut p = synthetic_report(btn0, btn1, btn2);
+        p[4] = btn3;
+        p
+    }
+
+    /// A full 45-byte (post report-ID-strip) report with sticks/pads/IMU set
+    /// from the given raw i16 values, for exercising the extended fields
+    /// that only appear on a full-length notification.
+    #[allow(clippy::too_many_arguments)]
+    fn synthetic_full_length_report(
+        rp_x: i16, rp_y: i16, rp_press: i16, accel: (i16, i16, i16), gyro: (i16, i16, i16),
+    ) -> Vec<u8> {
+        let mut p = vec![0u8; 45];
+        p[0] = 0x45;
+        p[23..25].copy_from_slice(&rp_x.to_le_bytes());
+        p[25..27].copy_from_slice(&rp_y.to_le_bytes());
+        p[27..29].copy_from_slice(&rp_press.to_le_bytes());
+        p[33..35].copy_from_slice(&accel.0.to_le_bytes());
+        p[35..37].copy_from_slice(&accel.1.to_le_bytes());
+        p[37..39].copy_from_slice(&accel.2.to_le_bytes());
+        p[39..41].copy_from_slice(&gyro.0.to_le_bytes());
+        p[41..43].copy_from_slice(&gyro.1.to_le_bytes());
+        p[43..45].copy_from_slice(&gyro.2.to_le_bytes());
+        p
+    }
+
     #[test]
     fn rejects_short_payload() {
         assert!(parse_steam(&[0x45, 0x01]).is_none());
@@ -507,6 +597,72 @@ mod tests {
         assert_eq!(s.rt, 0x00);
         assert!(s.l2_dig);
         assert!(!s.r2_dig);
+    }
+
+    #[test]
+    fn trigger_scaling_saturates_instead_of_wrapping_on_a_hard_pull() {
+        let mut p = synthetic_report(0x00, 0x00, 0x00);
+        // 40000 >> 7 = 312, which overflows a u8 (max 255). A plain `as u8`
+        // cast wraps that to 56 -- a hard pull must read as fully pressed
+        // (255), not a fifth of the way in.
+        p[7..9].copy_from_slice(&40000u16.to_le_bytes());
+        let s = parse_steam(&p).unwrap();
+        assert_eq!(s.rt, 255);
+    }
+
+    #[test]
+    fn digital_trigger_click_bits_register_even_below_the_analog_threshold() {
+        // Cross-checked against safijari/openpuck's TB_L2 (payload[4] bit 3)
+        // and TB_R2 (payload[3]/btn2 bit 7): a light click can set the
+        // digital bit well before the analog value crosses 8000.
+        let p = synthetic_report_full(0, 0, 0x80, 0x08);
+        let s = parse_steam(&p).unwrap();
+        assert!(s.r2_dig, "btn2 bit 7 (TB_R2) should register a digital click on its own");
+        assert!(s.l2_dig, "payload[4] bit 3 (TB_L2) should register a digital click on its own");
+    }
+
+    #[test]
+    fn touchpad_click_reads_the_pad_click_bits_not_the_l4_paddle() {
+        // Regression test: this field used to read btn2 & 0x02, which is
+        // actually the L4 back-paddle button (TB_L4), not a touchpad bit at
+        // all. Cross-checked against safijari/openpuck's triton.h: right pad
+        // click is btn2 (payload[3]) bit 6 (TB_RPADC), left pad click is
+        // payload[4] bit 2 (TB_LPADC).
+        let right_click = synthetic_report(0, 0, 0x40);
+        assert!(parse_steam(&right_click).unwrap().touchpad);
+
+        let left_click = synthetic_report_full(0, 0, 0, 0x04);
+        assert!(parse_steam(&left_click).unwrap().touchpad);
+
+        let l4_paddle_only = synthetic_report(0, 0, 0x02);
+        assert!(!parse_steam(&l4_paddle_only).unwrap().touchpad, "L4 paddle must not be read as a touchpad click");
+    }
+
+    #[test]
+    fn short_report_leaves_imu_zeroed_and_uses_stick_deflection_for_pad_active() {
+        let mut p = synthetic_report(0, 0, 0);
+        // Push the right stick hard right so the fallback pad-position proxy activates.
+        p[13..15].copy_from_slice(&30000i16.to_le_bytes());
+        let s = parse_steam(&p).unwrap();
+        assert_eq!((s.gyro_x, s.gyro_y, s.gyro_z), (0, 0, 0));
+        assert_eq!((s.accel_x, s.accel_y, s.accel_z), (0, 0, 0));
+        assert!(s.pad_active, "a 17-byte report should still fall back to the stick-deflection proxy");
+    }
+
+    #[test]
+    fn full_length_report_populates_real_gyro_accel_and_trackpad() {
+        let p = synthetic_full_length_report(1000, -2000, 500, (11, -22, 33), (111, -222, 333));
+        let s = parse_steam(&p).unwrap();
+        assert_eq!((s.gyro_x, s.gyro_y, s.gyro_z), (111, -222, 333));
+        assert_eq!((s.accel_x, s.accel_y, s.accel_z), (11, -22, 33));
+        assert!(s.pad_active, "non-zero pad press should mark the pad active");
+    }
+
+    #[test]
+    fn full_length_report_pad_inactive_when_press_is_zero() {
+        let p = synthetic_full_length_report(1000, -2000, 0, (0, 0, 0), (0, 0, 0));
+        let s = parse_steam(&p).unwrap();
+        assert!(!s.pad_active, "zero pad press should read as not touching, even with nonzero X/Y");
     }
 
     #[test]

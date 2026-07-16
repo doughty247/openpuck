@@ -29,7 +29,15 @@ fn device_identity(mode: OutputMode) -> (&'static str, u16, u16) {
     match mode {
         OutputMode::Xinput => ("FreePuck Virtual Xbox 360 Controller", 0x045E, 0x028E),
         OutputMode::Dualsense => ("FreePuck Virtual Gamepad (DualSense layout)", 0x054C, 0x0CE6),
-        OutputMode::Switch => ("FreePuck Virtual Gamepad (Switch Pro layout)", 0x057E, 0x2009),
+        // HORI Pokken Tournament Pro Pad id, not Nintendo's own Switch Pro
+        // Controller id (057E:2009). This matches both this repo's own
+        // ESP32 firmware (src/usb.rs) and safijari/openpuck's Switch mode —
+        // a real Switch console accepts the licensed HORI descriptor with
+        // no handshake, unlike Nintendo's own controller. Not that it
+        // matters for what a PC-side virtual device needs (SDL just reads
+        // the descriptor), but there's no reason to diverge from two
+        // independent projects that agree on this id.
+        OutputMode::Switch => ("FreePuck Virtual Gamepad (Switch Pro layout)", 0x0F0D, 0x0092),
     }
 }
 
