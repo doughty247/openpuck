@@ -7,6 +7,11 @@ edition = "2021"
 default = ["ble"]
 ble = []
 rf = []
+# A/B test alternative for rf's dpad/start-back-menu/right-stick/trigger/IMU
+# decode: cross-referenced against safijari/openpuck's confirmed report 0x45
+# layout instead of the original hand-guessed byte offsets. See puck.rs.
+# Meaningless without `rf` also enabled.
+rf-xref-mapping = []
 trace-haptics = []
 
 [dependencies]
