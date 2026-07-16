@@ -6,14 +6,14 @@
 //! every `ble::HAPTICS_RESEND_INTERVAL` (40ms) while the intent is non-zero,
 //! and stops resending (letting the timeout silence the motors) once it's zero.
 
-use crate::ble::{self, SteamGatt};
+use crate::ble::{self, ControllerPeripheral, SteamGatt};
 use crate::controller::HapticsIntent;
 use tokio::sync::watch;
 
 /// Runs forever, watching `intent_rx` for updates from an output backend's
 /// rumble callback and writing Triton rumble commands to the BLE output
 /// characteristic. Call via `tokio::spawn`.
-pub async fn run_rumble_bridge(gatt: SteamGatt, mut intent_rx: watch::Receiver<HapticsIntent>) {
+pub async fn run_rumble_bridge<P: ControllerPeripheral>(gatt: SteamGatt<P>, mut intent_rx: watch::Receiver<HapticsIntent>) {
     let mut interval = tokio::time::interval(ble::HAPTICS_RESEND_INTERVAL);
     let mut current = *intent_rx.borrow();
 
@@ -39,7 +39,7 @@ pub async fn run_rumble_bridge(gatt: SteamGatt, mut intent_rx: watch::Receiver<H
     }
 }
 
-async fn send_rumble(gatt: &SteamGatt, intent: HapticsIntent) -> anyhow::Result<()> {
+pub(crate) async fn send_rumble<P: ControllerPeripheral>(gatt: &SteamGatt<P>, intent: HapticsIntent) -> anyhow::Result<()> {
     let payload = ble::build_triton_rumble_with_id(intent.left_motor, intent.right_motor);
     ble::write_best_effort(&gatt.peripheral, &gatt.output_char, &payload).await
 }

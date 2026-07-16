@@ -1,14 +1,79 @@
 //! BLE central-role connection to a Steam Controller 2 (Triton), ported from
 //! the OpenPuck/FreePuck firmware's `src/bluetooth.rs` (trouble-host GATT
 //! server implementation) onto `btleplug` for desktop hosts.
+//!
+//! Everything except [`find_controller`] (which needs a real `btleplug`
+//! [`Central`]/[`Manager`] talking to an actual Bluetooth adapter) is generic
+//! over [`ControllerPeripheral`] — a narrow trait covering only the handful
+//! of operations this module actually needs, blanket-implemented for any
+//! real `btleplug::api::Peripheral`. It exists (rather than using
+//! `btleplug::api::Peripheral` directly as the bound) because that trait's
+//! `id()` method returns a `PeripheralId` whose inner field is private on
+//! every platform backend, making it impossible to construct outside the
+//! `btleplug` crate — so a mock can't implement the real trait at all. This
+//! bridge trait lets `mock_ble::MockController` stand in for a real
+//! peripheral in tests without touching real Bluetooth hardware.
 
 use anyhow::{anyhow, Context, Result};
 use btleplug::api::{
-    Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+    BDAddr, Central, CharPropFlags, Characteristic, Manager as _, PeripheralProperties, ScanFilter,
+    ValueNotification, WriteType,
 };
-use btleplug::platform::{Adapter, Manager, Peripheral};
+use btleplug::platform::{Adapter, Manager, Peripheral as PlatformPeripheral};
+use futures::stream::Stream;
+use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 use uuid::Uuid;
+
+/// The subset of `btleplug::api::Peripheral` this module needs, narrow
+/// enough that a test mock can implement it directly. See the module doc
+/// comment for why this exists instead of using the real trait as the bound.
+pub trait ControllerPeripheral: Clone + Send + Sync + 'static {
+    fn address(&self) -> BDAddr;
+    fn properties(&self) -> impl Future<Output = Result<Option<PeripheralProperties>>> + Send;
+    fn connect(&self) -> impl Future<Output = Result<()>> + Send;
+    fn discover_services(&self) -> impl Future<Output = Result<()>> + Send;
+    fn characteristics(&self) -> BTreeSet<Characteristic>;
+    fn subscribe(&self, characteristic: &Characteristic) -> impl Future<Output = Result<()>> + Send;
+    fn write(
+        &self,
+        characteristic: &Characteristic,
+        data: &[u8],
+        write_type: WriteType,
+    ) -> impl Future<Output = Result<()>> + Send;
+    fn notifications(
+        &self,
+    ) -> impl Future<Output = Result<Pin<Box<dyn Stream<Item = ValueNotification> + Send>>>> + Send;
+}
+
+impl<T: btleplug::api::Peripheral + 'static> ControllerPeripheral for T {
+    fn address(&self) -> BDAddr {
+        btleplug::api::Peripheral::address(self)
+    }
+    async fn properties(&self) -> Result<Option<PeripheralProperties>> {
+        Ok(btleplug::api::Peripheral::properties(self).await?)
+    }
+    async fn connect(&self) -> Result<()> {
+        Ok(btleplug::api::Peripheral::connect(self).await?)
+    }
+    async fn discover_services(&self) -> Result<()> {
+        Ok(btleplug::api::Peripheral::discover_services(self).await?)
+    }
+    fn characteristics(&self) -> BTreeSet<Characteristic> {
+        btleplug::api::Peripheral::characteristics(self)
+    }
+    async fn subscribe(&self, characteristic: &Characteristic) -> Result<()> {
+        Ok(btleplug::api::Peripheral::subscribe(self, characteristic).await?)
+    }
+    async fn write(&self, characteristic: &Characteristic, data: &[u8], write_type: WriteType) -> Result<()> {
+        Ok(btleplug::api::Peripheral::write(self, characteristic, data, write_type).await?)
+    }
+    async fn notifications(&self) -> Result<Pin<Box<dyn Stream<Item = ValueNotification> + Send>>> {
+        Ok(btleplug::api::Peripheral::notifications(self).await?)
+    }
+}
 
 /// Vendor-specific prefixes that all Steam Controllers advertise.
 /// Observed advertisement name: "Steam Ctrl (BT) FXA9961102DD6"
@@ -46,7 +111,7 @@ pub const LIZARD_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(3000);
 /// faster than that to keep it going (matches SDL's TRITON_RUMBLE_RESEND_INTERVAL_MS).
 pub const HAPTICS_RESEND_INTERVAL: Duration = Duration::from_millis(40);
 
-fn matches_steam_controller(name: &str) -> bool {
+pub(crate) fn matches_steam_controller(name: &str) -> bool {
     name.starts_with(STEAM_NAME_PREFIX) || name.starts_with(STEAM_PUCK_NAME_PREFIX)
 }
 
@@ -109,9 +174,10 @@ pub fn build_triton_rumble_with_id(left_speed: u16, right_speed: u16) -> [u8; 10
 }
 
 /// Discovered Steam Controller GATT handles needed to read input and send commands.
+/// Generic over the BLE peripheral type so tests can substitute a mock.
 #[derive(Clone)]
-pub struct SteamGatt {
-    pub peripheral: Peripheral,
+pub struct SteamGatt<P: ControllerPeripheral> {
+    pub peripheral: P,
     /// Notifies with parsed input reports (Triton or D0G input characteristic).
     pub input_char: Characteristic,
     /// HID feature-report characteristic (settings, lizard-off, haptics-enable).
@@ -123,6 +189,10 @@ pub struct SteamGatt {
     pub output_char: Characteristic,
 }
 
+/// [`SteamGatt`] specialized to the real `btleplug` platform backend — the
+/// type production code (`main.rs`) actually uses.
+pub type PlatformGatt = SteamGatt<PlatformPeripheral>;
+
 async fn get_manager_adapter() -> Result<Adapter> {
     let manager = Manager::new().await.context("failed to init BLE manager")?;
     let adapters = manager.adapters().await.context("failed to list BLE adapters")?;
@@ -133,7 +203,7 @@ async fn get_manager_adapter() -> Result<Adapter> {
 }
 
 /// Scans for a Steam Controller by advertised name prefix and returns it once found.
-pub async fn find_controller(scan_timeout: Duration) -> Result<Peripheral> {
+pub async fn find_controller(scan_timeout: Duration) -> Result<PlatformPeripheral> {
     let adapter = get_manager_adapter().await?;
     adapter
         .start_scan(ScanFilter::default())
@@ -168,7 +238,7 @@ pub async fn find_controller(scan_timeout: Duration) -> Result<Peripheral> {
 
 /// Writes to a characteristic, preferring write-without-response and falling
 /// back to write-with-response — mirrors the firmware's dual-attempt writes.
-pub async fn write_best_effort(peripheral: &Peripheral, ch: &Characteristic, data: &[u8]) -> Result<()> {
+pub async fn write_best_effort<P: ControllerPeripheral>(peripheral: &P, ch: &Characteristic, data: &[u8]) -> Result<()> {
     if ch.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE) {
         if peripheral.write(ch, data, WriteType::WithoutResponse).await.is_ok() {
             return Ok(());
@@ -183,7 +253,7 @@ pub async fn write_best_effort(peripheral: &Peripheral, ch: &Characteristic, dat
 /// Scores HID characteristics to guess which is the output (rumble) vs.
 /// feature (settings) report, since desktop BLE stacks don't expose the raw
 /// ATT handles the firmware uses as a fast-path hint.
-fn score_hid_characteristics(
+pub(crate) fn score_hid_characteristics(
     chars: impl Iterator<Item = Characteristic>,
     control_point: Option<&Characteristic>,
     protocol_mode: Option<&Characteristic>,
@@ -228,7 +298,7 @@ fn score_hid_characteristics(
 
 /// Connects to a discovered Steam Controller peripheral and resolves the GATT
 /// characteristics needed to read input and send commands.
-pub async fn connect_and_discover(peripheral: Peripheral) -> Result<SteamGatt> {
+pub async fn connect_and_discover<P: ControllerPeripheral>(peripheral: P) -> Result<SteamGatt<P>> {
     peripheral.connect().await.context("BLE connect failed")?;
     peripheral.discover_services().await.context("GATT service discovery failed")?;
 
@@ -291,7 +361,7 @@ pub async fn connect_and_discover(peripheral: Peripheral) -> Result<SteamGatt> {
 /// Sends the one-time initialization sequence: clear digital mappings, base
 /// settings, and explicit haptics-enable. Ported from the firmware's
 /// per-connection init writes.
-pub async fn send_init_commands(gatt: &SteamGatt) -> Result<()> {
+pub async fn send_init_commands<P: ControllerPeripheral>(gatt: &SteamGatt<P>) -> Result<()> {
     let clear_cmd = [0x81u8];
     write_best_effort(&gatt.peripheral, &gatt.feature_char, &clear_cmd)
         .await
@@ -310,20 +380,31 @@ pub async fn send_init_commands(gatt: &SteamGatt) -> Result<()> {
     Ok(())
 }
 
+/// Sends one lizard-off + haptics-enable keepalive round. Split out from
+/// [`run_lizard_keepalive`]'s infinite loop so it's directly testable.
+pub(crate) async fn send_lizard_tick<P: ControllerPeripheral>(gatt: &SteamGatt<P>) -> Result<()> {
+    let lizard_off = build_triton_lizard_off();
+    write_best_effort(&gatt.peripheral, &gatt.feature_char, &lizard_off)
+        .await
+        .context("lizard-mode keepalive write failed")?;
+
+    let haptics_enable = build_triton_haptics_enable();
+    write_best_effort(&gatt.peripheral, &gatt.feature_char, &haptics_enable)
+        .await
+        .context("haptics-enable keepalive write failed")?;
+
+    Ok(())
+}
+
 /// Runs the lizard-mode keepalive loop forever: every 3s, re-send lizard-off
 /// plus haptics-enable so the controller stays out of trackpad-to-keyboard mode.
-pub async fn run_lizard_keepalive(gatt: SteamGatt) -> ! {
-    let lizard_off = build_triton_lizard_off();
-    let haptics_enable = build_triton_haptics_enable();
+pub async fn run_lizard_keepalive<P: ControllerPeripheral>(gatt: SteamGatt<P>) -> ! {
     let mut interval = tokio::time::interval(LIZARD_KEEPALIVE_INTERVAL);
     interval.tick().await; // first tick fires immediately; commands already sent by send_init_commands
     loop {
         interval.tick().await;
-        if let Err(e) = write_best_effort(&gatt.peripheral, &gatt.feature_char, &lizard_off).await {
-            log::warn!("lizard-mode keepalive failed: {e:#}");
-        }
-        if let Err(e) = write_best_effort(&gatt.peripheral, &gatt.feature_char, &haptics_enable).await {
-            log::warn!("haptics-enable keepalive failed: {e:#}");
+        if let Err(e) = send_lizard_tick(&gatt).await {
+            log::warn!("lizard-mode keepalive round failed: {e:#}");
         }
     }
 }

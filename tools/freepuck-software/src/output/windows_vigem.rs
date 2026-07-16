@@ -100,6 +100,17 @@ fn ds4report_from_state(s: &GamepadState) -> DS4Report {
 /// disconnects. Blocking — call via `std::thread::spawn` or
 /// `tokio::task::spawn_blocking`, not directly from an async task.
 pub fn run(mode: OutputMode, state_rx: Receiver<GamepadState>, haptics_tx: Sender<HapticsIntent>) -> Result<()> {
+    // Checked before connecting to ViGEmBus so this fails fast (and is
+    // testable) without requiring the driver to be installed just to learn
+    // Switch mode isn't supported.
+    if mode == OutputMode::Switch {
+        bail!(
+            "Switch Pro output is not supported on Windows: ViGEmBus has no Switch Pro emulation \
+             target, and a PC cannot present itself as a USB device to a physical Switch console \
+             the way the hardware dongle firmware can. Use --mode xinput or --mode dualsense instead."
+        );
+    }
+
     let client = Client::connect().context(
         "failed to connect to ViGEmBus — is the driver installed? https://github.com/ViGEm/ViGEmBus/releases",
     )?;
@@ -107,11 +118,7 @@ pub fn run(mode: OutputMode, state_rx: Receiver<GamepadState>, haptics_tx: Sende
     match mode {
         OutputMode::Xinput => run_xbox360(client, state_rx, haptics_tx),
         OutputMode::Dualsense => run_ds4(client, state_rx),
-        OutputMode::Switch => bail!(
-            "Switch Pro output is not supported on Windows: ViGEmBus has no Switch Pro emulation \
-             target, and a PC cannot present itself as a USB device to a physical Switch console \
-             the way the hardware dongle firmware can. Use --mode xinput or --mode dualsense instead."
-        ),
+        OutputMode::Switch => unreachable!("handled above"),
     }
 }
 
@@ -157,4 +164,99 @@ fn run_ds4(client: Client, state_rx: Receiver<GamepadState>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn xgamepad_maps_face_and_dpad_buttons() {
+        let mut s = GamepadState::default_centred();
+        s.a = true;
+        s.b = true;
+        s.dpad_up = true;
+        s.l1 = true;
+        let gamepad = xgamepad_from_state(&s);
+        // XButtons::A/B/UP/LB are plain u16 bit-flag constants (not XButtons instances).
+        let expected = XButtons::A | XButtons::B | XButtons::UP | XButtons::LB;
+        assert_eq!(gamepad.buttons.raw, expected);
+        assert_eq!(gamepad.left_trigger, 0);
+        assert_eq!(gamepad.right_trigger, 0);
+    }
+
+    #[test]
+    fn xgamepad_sticks_are_centred_at_zero() {
+        let s = GamepadState::default_centred();
+        let gamepad = xgamepad_from_state(&s);
+        assert_eq!((gamepad.thumb_lx, gamepad.thumb_ly, gamepad.thumb_rx, gamepad.thumb_ry), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn xgamepad_stick_extremes_saturate_instead_of_overflowing() {
+        let mut full_right = GamepadState::default_centred();
+        full_right.lx = 255;
+        let gamepad = xgamepad_from_state(&full_right);
+        assert_eq!(gamepad.thumb_lx, (255i16 - 128).saturating_mul(258));
+
+        // 0 maps to -128*258 = -33024, which overflows i16::MIN (-32768) —
+        // this must saturate, not wrap, or a hard-left stick would read as
+        // hard-right to the game.
+        let mut full_left = GamepadState::default_centred();
+        full_left.lx = 0;
+        let gamepad = xgamepad_from_state(&full_left);
+        assert_eq!(gamepad.thumb_lx, i16::MIN);
+    }
+
+    #[test]
+    fn xgamepad_y_axis_is_inverted_for_xinput_convention() {
+        // GamepadState: 0 = up. XInput: positive = up. Pushing the stick to
+        // the top of its range (ly=0) must produce a positive thumb_ly.
+        let mut s = GamepadState::default_centred();
+        s.ly = 0;
+        let gamepad = xgamepad_from_state(&s);
+        assert!(gamepad.thumb_ly > 0, "stick pushed up should read as a positive XInput Y value");
+    }
+
+    #[test]
+    fn ds4_report_hat_defaults_to_centred_value_eight() {
+        let s = GamepadState::default_centred();
+        let report = ds4report_from_state(&s);
+        assert_eq!(report.buttons & 0x0F, 8, "ViGEmBus DS4_REPORT centred hat value is 8, matching dpad_to_hat's default");
+    }
+
+    #[test]
+    fn ds4_report_maps_face_buttons_and_shoulders() {
+        let mut s = GamepadState::default_centred();
+        s.x = true; // Square, bit 4
+        s.l1 = true; // bit 8
+        s.r2_dig = true; // bit 11
+        let report = ds4report_from_state(&s);
+        assert_ne!(report.buttons & (1 << 4), 0, "Square bit should be set");
+        assert_ne!(report.buttons & (1 << 8), 0, "L1 bit should be set");
+        assert_ne!(report.buttons & (1 << 11), 0, "R2 digital bit should be set");
+        assert_eq!(report.buttons & (1 << 5), 0, "Cross bit should not be set");
+    }
+
+    #[test]
+    fn ds4_report_special_byte_routes_home_and_qam_touchpad() {
+        let mut s = GamepadState::default_centred();
+        s.home = true;
+        s.qam = true;
+        let report = ds4report_from_state(&s);
+        assert_eq!(report.special & 0x01, 0x01, "PS bit should be set from home");
+        assert_eq!(report.special & 0x02, 0x02, "Touchpad-click bit should be set from QAM (no direct touchpad field on Steam Controller)");
+    }
+
+    #[test]
+    fn switch_mode_is_rejected_before_touching_vigembus() {
+        // Must fail without requiring ViGEmBus to be installed on the test
+        // runner — see the fail-fast check at the top of `run`.
+        let (_state_tx, state_rx) = mpsc::channel::<GamepadState>();
+        let (haptics_tx, _haptics_rx) = mpsc::channel::<HapticsIntent>();
+        let result = run(OutputMode::Switch, state_rx, haptics_tx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Switch Pro output is not supported"));
+    }
 }

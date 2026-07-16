@@ -3,6 +3,11 @@ mod controller;
 mod haptics;
 mod output;
 
+#[cfg(test)]
+mod mock_ble;
+#[cfg(test)]
+mod chain_tests;
+
 use anyhow::{Context, Result};
 use btleplug::api::Peripheral as _;
 use clap::{Parser, Subcommand};
@@ -50,7 +55,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn connect(scan_timeout: Duration) -> Result<ble::SteamGatt> {
+async fn connect(scan_timeout: Duration) -> Result<ble::PlatformGatt> {
     println!("Scanning for Steam Controller (timeout {scan_timeout:?})...");
     let peripheral = ble::find_controller(scan_timeout).await.context("scan failed")?;
 

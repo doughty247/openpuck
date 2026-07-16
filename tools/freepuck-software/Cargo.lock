@@ -408,6 +408,7 @@ dependencies = [
  "futures",
  "log",
  "tokio",
+ "tokio-stream",
  "uinput",
  "uuid",
  "vigem-client",
