@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+steam-protocol = { path = "../../crates/steam-protocol" }
 anyhow = "1.0.103"
 btleplug = "0.11"
 clap = { version = "4.6.2", features = ["derive"] }

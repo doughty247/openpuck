@@ -1,0 +1,7 @@
+[package]
+name = "steam-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Steam Controller 2 BLE/USB report codec and Valve GATT command builders, shared between the ESP32-S3 firmware and the freepuck-software desktop bridge."
+
+[dependencies]

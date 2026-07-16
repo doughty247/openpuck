@@ -136,38 +136,24 @@ fn build_triton_rumble(left_speed: u16, right_speed: u16) -> [u8; 9] {
 }
 
 /// Full Triton haptic rumble output report including report ID 0x80.
+/// Delegates to the shared `steam-protocol` crate (also used by
+/// `freepuck-software`'s `ble.rs`) rather than building locally -- kept as
+/// a same-name, same-signature wrapper so every call site below is
+/// untouched. NOTE: this delegation could not be compiled against the real
+/// firmware target in the environment that made this change (no xtensa
+/// toolchain available) -- build with the real toolchain before trusting it.
 fn build_triton_rumble_with_id(left_speed: u16, right_speed: u16) -> [u8; 10] {
-    let payload = build_triton_rumble(left_speed, right_speed);
-    let mut out = [0u8; 10];
-    out[0] = TRITON_CMD_RUMBLE;
-    out[1..].copy_from_slice(&payload);
-    out
+    steam_protocol::gatt::build_triton_rumble_with_id(left_speed, right_speed)
 }
 
+/// Delegates to the shared crate -- see `build_triton_rumble_with_id`'s note.
 fn build_triton_lizard_off() -> [u8; 64] {
-    let mut buf = [0u8; 64];
-    buf[0] = TRITON_CMD_SET_SETTINGS;
-    buf[1] = 0x03;
-    buf[2] = TRITON_SETTING_LIZARD_MODE;
-    buf[3] = 0x00;
-    buf[4] = 0x00;
-    buf
+    steam_protocol::gatt::build_triton_lizard_off()
 }
 
+/// Delegates to the shared crate -- see `build_triton_rumble_with_id`'s note.
 fn build_triton_haptics_enable() -> [u8; 11] {
-    [
-        TRITON_CMD_SET_SETTINGS,
-        0x09, // 3 settings * 3 bytes each
-        TRITON_SETTING_HAPTICS_ENABLED,
-        0x01,
-        0x00, // ON
-        TRITON_SETTING_HAPTIC_MASTER_GAIN_DB,
-        0x06,
-        0x00, // +6 dB (maximum master gain)
-        TRITON_SETTING_HAPTIC_INTENSITY,
-        0x04,
-        0x00, // INSANE
-    ]
+    steam_protocol::gatt::build_triton_haptics_enable()
 }
 
 // Compatibility fallback for Steam feature-report rumble path used by some devices.

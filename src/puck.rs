@@ -33,6 +33,10 @@ pub struct PuckProvisional {
 #[derive(Clone, Copy)]
 pub struct PuckParseResult {
     pub state: GamepadState,
+    /// Was `state.puck_provisional` before `GamepadState` moved into the
+    /// shared `steam-protocol` crate, which has no reason to know about
+    /// this RF-only, provisional decode surface. Carried alongside instead.
+    pub provisional: PuckProvisional,
     #[allow(dead_code)]
     pub counter: u8,
 }
@@ -111,10 +115,11 @@ impl PuckParser {
             pad_x: 960,
             pad_y: 540,
             pad_active: false,
-            puck_provisional: Some(provisional),
+            gyro_x: 0, gyro_y: 0, gyro_z: 0,
+            accel_x: 0, accel_y: 0, accel_z: 0,
         };
 
-        Some(PuckParseResult { state, counter })
+        Some(PuckParseResult { state, provisional, counter })
     }
 
     fn counter_gap(prev: u8, current: u8) -> Option<u8> {
@@ -177,7 +182,7 @@ mod tests {
         assert!(parsed.state.r1);
         assert_eq!(parsed.counter, 0x2a);
 
-        let provisional = parsed.state.puck_provisional.expect("provisional fields present");
+        let provisional = parsed.provisional;
         assert_eq!(provisional.provisional_start_back_menu_bits, 0x03);
         assert_eq!(provisional.provisional_dpad_b14, 0x12);
         assert_eq!(provisional.provisional_rstick_x_b15, 0x34);

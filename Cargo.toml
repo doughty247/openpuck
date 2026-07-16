@@ -11,6 +11,9 @@ trace-haptics = []
 
 [dependencies]
 log = "0.4"
+# Steam Controller 2 protocol codec and GATT command builders, shared with
+# tools/freepuck-software. no_std, no dependencies of its own (core only).
+steam-protocol = { path = "crates/steam-protocol" }
 
 [target.xtensa-esp32s3-none-elf.dependencies]
 esp-backtrace = { version = "0.19.0", features = ["esp32s3", "panic-handler", "println"] }

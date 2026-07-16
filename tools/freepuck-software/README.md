@@ -5,9 +5,14 @@ Bluetooth and presents the controller to the OS as a virtual XInput,
 DualSense-equivalent, or Switch-Pro-layout controller — no ESP32 dongle, no
 Steam running, no additional hardware.
 
-This reuses the BLE protocol implementation, GATT UUIDs, and haptics commands
-already validated against real hardware in this repo's ESP32-S3 firmware
-(`src/bluetooth.rs`, `src/controller.rs`). See
+The report parser, output formatters, and GATT command builders live in
+[`crates/steam-protocol`](../../crates/steam-protocol) — a `no_std` crate
+this bridge shares with the repo's ESP32-S3 firmware (`src/controller.rs`
+and parts of `src/bluetooth.rs` there are thin wrappers around the same
+crate), rather than two independently-maintained copies. Only the BLE
+transport (`ble.rs`, `btleplug`-based here vs. `trouble-host` in the
+firmware) and output device wiring (ViGEmBus/uinput here vs. USB gadget mode
+in the firmware) are platform-specific and stay local to each. See
 [`docs/ble-protocol.md`](docs/ble-protocol.md) for the protocol reference.
 
 ## Status

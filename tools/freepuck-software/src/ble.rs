@@ -25,6 +25,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
+use steam_protocol::gatt;
 use uuid::Uuid;
 
 /// The subset of `btleplug::api::Peripheral` this module needs, narrow
@@ -80,98 +81,46 @@ impl<T: btleplug::api::Peripheral + 'static> ControllerPeripheral for T {
 const STEAM_NAME_PREFIX: &str = "Steam Ctrl";
 const STEAM_PUCK_NAME_PREFIX: &str = "Steam Controller Puck";
 
-// Valve custom GATT service and characteristics (Steam Controller 2 / Triton).
-// UUID bytes below are the firmware's little-endian wire order, reversed to
-// the standard big-endian UUID string form used by the `uuid` crate.
-pub const VALVE_SERVICE_UUID: Uuid = uuid::uuid!("100f6c32-1735-4313-b402-38567131e5f3");
+// Valve custom GATT service and characteristics (Steam Controller 2 / Triton),
+// plus the command builders below: all sourced from `steam_protocol::gatt`,
+// the single implementation shared with the firmware's `bluetooth.rs`. UUIDs
+// there are raw wire-order bytes (what `trouble-host` wants directly); the
+// `uuid` crate's `Uuid::from_bytes` wants the reversed, big-endian string
+// form, hence `reversed()` below.
+const fn reversed(bytes: [u8; 16]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        out[i] = bytes[15 - i];
+        i += 1;
+    }
+    out
+}
+
+pub const VALVE_SERVICE_UUID: Uuid = Uuid::from_bytes(reversed(gatt::VALVE_SERVICE_UUID_BYTES));
 /// Steam Controller 2 (Triton) input characteristic. Gen 1 (D0G, 2015)
 /// advertises a different suffix and is not supported by this bridge.
-pub const TRITON_INPUT_UUID: Uuid = uuid::uuid!("100f6c7a-1735-4313-b402-38567131e5f3");
-pub const D0G_INPUT_UUID: Uuid = uuid::uuid!("100f6c33-1735-4313-b402-38567131e5f3");
+pub const TRITON_INPUT_UUID: Uuid = Uuid::from_bytes(reversed(gatt::TRITON_INPUT_UUID_BYTES));
+pub const D0G_INPUT_UUID: Uuid = Uuid::from_bytes(reversed(gatt::D0G_INPUT_UUID_BYTES));
 /// Valve "report" characteristic — fallback command channel when the
 /// standard HID feature characteristic can't be identified.
-pub const VALVE_REPORT_UUID: Uuid = uuid::uuid!("100f6c34-1735-4313-b402-38567131e5f3");
+pub const VALVE_REPORT_UUID: Uuid = Uuid::from_bytes(reversed(gatt::VALVE_REPORT_UUID_BYTES));
 
 // Standard Bluetooth SIG HID-over-GATT UUIDs.
 pub const HID_SERVICE_UUID: Uuid = uuid::uuid!("00001812-0000-1000-8000-00805f9b34fb");
 pub const HID_CONTROL_POINT_UUID: Uuid = uuid::uuid!("00002a4c-0000-1000-8000-00805f9b34fb");
 pub const HID_PROTOCOL_MODE_UUID: Uuid = uuid::uuid!("00002a4e-0000-1000-8000-00805f9b34fb");
 
-// Steam Controller 2 (Triton) command bytes, ported from bluetooth.rs.
-pub const TRITON_CMD_RUMBLE: u8 = 0x80; // HID output report reference ID for rumble
-pub const TRITON_CMD_SET_SETTINGS: u8 = 0x87;
-pub const TRITON_SETTING_LIZARD_MODE: u8 = 0x09;
-pub const TRITON_SETTING_HAPTICS_ENABLED: u8 = 70;
-pub const TRITON_SETTING_HAPTIC_MASTER_GAIN_DB: u8 = 76;
-pub const TRITON_SETTING_HAPTIC_INTENSITY: u8 = 79;
-
-/// Every 3 seconds, or the built-in lizard mode (trackpad-to-keyboard mapping) re-enables.
-pub const LIZARD_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(3000);
+pub const LIZARD_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(gatt::LIZARD_KEEPALIVE_INTERVAL_MS);
 /// Steam Controller 2 haptics hardware safety timeout is ~50ms; resend sustained rumble
 /// faster than that to keep it going (matches SDL's TRITON_RUMBLE_RESEND_INTERVAL_MS).
-pub const HAPTICS_RESEND_INTERVAL: Duration = Duration::from_millis(40);
+pub const HAPTICS_RESEND_INTERVAL: Duration = Duration::from_millis(gatt::HAPTICS_RESEND_INTERVAL_MS);
 
 pub(crate) fn matches_steam_controller(name: &str) -> bool {
     name.starts_with(STEAM_NAME_PREFIX) || name.starts_with(STEAM_PUCK_NAME_PREFIX)
 }
 
-fn build_triton_lizard_off() -> [u8; 64] {
-    let mut buf = [0u8; 64];
-    buf[0] = TRITON_CMD_SET_SETTINGS;
-    buf[1] = 0x03;
-    buf[2] = TRITON_SETTING_LIZARD_MODE;
-    buf[3] = 0x00;
-    buf[4] = 0x00;
-    buf
-}
-
-fn build_triton_haptics_enable() -> [u8; 11] {
-    [
-        TRITON_CMD_SET_SETTINGS,
-        0x09, // 3 settings * 3 bytes each
-        TRITON_SETTING_HAPTICS_ENABLED,
-        0x01,
-        0x00, // ON
-        TRITON_SETTING_HAPTIC_MASTER_GAIN_DB,
-        0x06,
-        0x00, // +6 dB (maximum master gain)
-        TRITON_SETTING_HAPTIC_INTENSITY,
-        0x04,
-        0x00, // INSANE
-    ]
-}
-
-fn scale_rumble(val: u16) -> u16 {
-    if val == 0 {
-        0
-    } else {
-        // Boost low values so they are felt on the LRA, mapping 1..65535 to 12000..65535.
-        let min_val = 12000u32;
-        let max_val = 65535u32;
-        let scaled = min_val + ((val as u32) * (max_val - min_val) / 65535);
-        scaled as u16
-    }
-}
-
-/// Full Triton haptic rumble output report, including report ID 0x80.
-/// Layout matches SDL's MsgHapticRumble payload:
-///   type:u8, intensity:u16, left.speed:u16, left.gain:i8, right.speed:u16, right.gain:i8
-pub fn build_triton_rumble_with_id(left_speed: u16, right_speed: u16) -> [u8; 10] {
-    let scaled_left = scale_rumble(left_speed);
-    let scaled_right = scale_rumble(right_speed);
-    [
-        TRITON_CMD_RUMBLE,
-        0x00, // type
-        0x00, // intensity (low) - 0 triggers internal hardware LRA emulator
-        0x00, // intensity (high)
-        (scaled_left & 0xFF) as u8,
-        (scaled_left >> 8) as u8,
-        0x06, // left gain dB (maximum boost)
-        (scaled_right & 0xFF) as u8,
-        (scaled_right >> 8) as u8,
-        0x06, // right gain dB (maximum boost)
-    ]
-}
+pub use gatt::{build_triton_haptics_enable, build_triton_lizard_off, build_triton_rumble_with_id};
 
 /// Discovered Steam Controller GATT handles needed to read input and send commands.
 /// Generic over the BLE peripheral type so tests can substitute a mock.
