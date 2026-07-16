@@ -13,8 +13,6 @@ use bt_hci::controller::ExternalController;
 use trouble_host::prelude::*;
 
 mod controller;
-#[cfg(feature = "rf")]
-mod puck;
 mod usb;
 mod bluetooth;
 mod storage;
@@ -37,26 +35,13 @@ static LED_MODE: AtomicU8 = AtomicU8::new(0xFF);
 #[embassy_executor::task]
 async fn coordinator_task() {
     log::info!("Starting translation coordinator task");
-    #[cfg(feature = "rf")]
-    let mut puck_parser = crate::puck::PuckParser::new();
 
     loop {
         let raw: [u8; 64] = BLE_REPORTS.wait().await;
         let ble_instant = embassy_time::Instant::now();
         let data_len = raw[2] as usize;
         let payload = &raw[3..3 + data_len.min(61)];
-        let state = parse_steam(payload)
-            .or_else(|| {
-                #[cfg(feature = "rf")]
-                {
-                    puck_parser.parse_report_0x45(payload).map(|parsed| parsed.state)
-                }
-                #[cfg(not(feature = "rf"))]
-                {
-                    None
-                }
-            });
-        if let Some(state) = state {
+        if let Some(state) = parse_steam(payload) {
             let mode = storage::current_output_mode();
             let report: [u8; 64] = match mode {
                 storage::OutputMode::XInput => {
